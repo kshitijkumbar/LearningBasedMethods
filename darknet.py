@@ -29,6 +29,17 @@ def parse_cfg_file(cfgfile):
             key,value = line.split('=')
             block[key.rstrip()] = value.lstrip()
     blocks = blocks[1:]
-     
+
+class yolov3(nn.Module):
+    def __init__(self, blocks) -> None:
+        super(yolov3, self).__init__()
+        net_metadata = blocks[0]
+        module_list = nn.ModuleList()
+        prev_filter_depth = 3 # Starting with RGB
+        output_filter_depth = []
+
+        for idx, block in enumerate(blocks[1:]):
+            module = nn.Sequential()
+            
 
 parse_cfg_file('cfg/yolov3.cfg')
