@@ -4,7 +4,15 @@ import torch.nn as nn
 import torch.nn.functional as F 
 from torch.autograd import Variable
 import numpy as np
-
+from util import * 
+def get_test_input():
+    img = cv2.imread("dog-cycle-car.png")
+    img = cv2.resize(img, (416,416))          #Resize to the input dimension
+    img_ =  img[:,:,::-1].transpose((2,0,1))  # BGR -> RGB | H X W C -> C X H X W 
+    img_ = img_[np.newaxis,:,:,:]/255.0       #Add a channel at 0 (for batch) | Normalise
+    img_ = torch.from_numpy(img_).float()     #Convert to float
+    img_ = Variable(img_)                     # Convert to Variable
+    return img_
 def parse_cfg_file(cfgfile):
     """
     Param: Configuration file
@@ -42,10 +50,11 @@ class DetectionLayer(nn.Module):
 class yolov3(nn.Module):
     def __init__(self, blocks) -> None:
         super(yolov3, self).__init__()
-        net_metadata = blocks[0]
-        module_list = nn.ModuleList()
-        prev_filter_depth = 3 # Starting with RGB
-        output_filter_depth = []
+        self.blocks = blocks
+        self.net_metadata = blocks[0]
+        self.module_list = nn.ModuleList()
+        self.prev_filter_depth = 3 # Starting with RGB
+        self.output_filter_depth = []
 
         for idx, block in enumerate(blocks[1:]):
             module = nn.Sequential()
@@ -72,7 +81,7 @@ class yolov3(nn.Module):
                     pad = 0
                 
                 #Add the convolutional layer
-                conv = nn.Conv2d(prev_filter_depth, filters, kernel_size, stride, pad, bias = bias)
+                conv = nn.Conv2d(self.prev_filter_depth, filters, kernel_size, stride, pad, bias = bias)
                 module.add_module("conv_{0}".format(idx), conv)
 
                 #Add the Batch Norm Layer
@@ -111,9 +120,9 @@ class yolov3(nn.Module):
                 route = EmptyLayer()
                 module.add_module("route_{0}".format(idx), route)
                 if end < 0:
-                    filters = output_filter_depth[idx + start] + output_filter_depth[idx + end]
+                    filters = self.output_filter_depth[idx + start] + self.output_filter_depth[idx + end]
                 else:
-                    filters= output_filter_depth[idx + start]
+                    filters= self.output_filter_depth[idx + start]
 
             #shortcut corresponds to skip connection
             elif block["type"] == "shortcut":
@@ -133,10 +142,70 @@ class yolov3(nn.Module):
                 detection = DetectionLayer(anchors)
                 module.add_module("Detection_{}".format(idx), detection)
             
-            module_list.append(module)
-            prev_filters = filters
-            output_filter_depth.append(filters)
+            self.module_list.append(module)
+            self.prev_filter_depth = filters
+            self.output_filter_depth.append(filters)
+
+    def forward(self, x, CUDA):
+        modules = self.blocks[1:]
+        outputs = {}   #We cache the outputs for the route layer
+        write = 0
+        detections = None
+        for idx, module in enumerate(modules):
+            module_type = (module['type'])
+            if module_type == 'convolutional' or module_type == 'upsample':
+                x = self.module_list[idx](x)
+            elif module_type == "route":
+                layers = module["layers"]
+                layers = [int(a) for a in layers]
+
+                if (layers[0]) > 0:
+                    layers[0] = layers[0] - idx
+
+                if len(layers) == 1:
+                    x = outputs[idx + (layers[0])]
+
+                else:
+                    if (layers[1]) > 0:
+                        layers[1] = layers[1] - idx
+
+                    map1 = outputs[idx + layers[0]]
+                    map2 = outputs[idx + layers[1]]
+
+                    x = torch.cat((map1, map2), 1)
+
+            elif  module_type == "shortcut":
+                from_ = int(module["from"])
+                x = outputs[idx-1] + outputs[idx+from_]
+            elif module_type == 'yolo':        
+
+                anchors = self.module_list[idx][0].anchors
+                #Get the input dimensions
+                inp_dim = int (self.net_info["height"])
+
+                #Get the number of classes
+                num_classes = int (module["classes"])
+
+                #Transform 
+                x = x.data
+                x = predict_transform(x, inp_dim, anchors, num_classes, CUDA)
+                if not write:              #if no collector has been intialised. 
+                    detections = x
+                    write = 1
+
+                else:       
+                    detections = torch.cat((detections, x), 1)
+
+            outputs[idx] = x
+            return detections
+
+
+
 
 
 blocks = parse_cfg_file('cfg/yolov3.cfg')
-yolo_nw = yolov3(blocks)            
+yolo_nw = yolov3(blocks)
+model = yolo_nw
+inp = get_test_input()
+pred = model(inp, torch.cuda.is_available())
+print (pred)            
